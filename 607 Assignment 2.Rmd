@@ -1,0 +1,203 @@
+---
+title: "Data 607 Assignment One"
+author: "Claire Meyer"
+date: "2/9/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This document takes survey responses from **[this survey](https://forms.gle/Yhfs8EtiWFsMpsiPA)**, looking at ratings of recent Oscar contenders. The raw results are transformed in a SQL script, included **[here](https://github.com/cmm6/data607-assignment2/blob/main/assignment2_607.sql)**, and ported into R in CSV form. 
+
+As an alternative solution that is more easily reproducible, I also explored the *googlesheets4* package described **[here](https://github.com/tidyverse/googlesheets4)** and leveraged the *sqldf* package to recreate the SQL script in R Markdown.
+
+### Libraries
+First we load the needed libraries. 
+
+```{r libs, message=FALSE}
+#install.packages("googlesheets4")
+#install.packages("sqldf")
+library(tidyverse)
+library(devtools)
+library(RCurl)
+library(googlesheets4)
+library(sqldf)
+# per documentation, deauth means you won't need a password for google sheets
+gs4_deauth()
+```
+
+## Solution 1
+
+### Getting the Data
+First we import the data from Github, and prepare the dataframe for exploration. 
+
+```{r import-csv}
+# Imports results into a dataframe from local CSV
+# results <- read.csv('/Users/clairemeyer/Data/transformed_survey.csv',header=FALSE,sep=",")
+
+# Import CSV file from Github
+x <- getURL("http://raw.githubusercontent.com/cmm6/data607-assignment2/main/transformed_survey.csv",.opts=curlOptions(followlocation = TRUE)) 
+results <- read.csv(text = x, header=FALSE)
+
+# Add column names
+colnames(results) <- c('participant_id','timestamp','film','score')
+
+# Let's filter out unseen films (value set to 0) in another df
+seen_results <- results %>%
+  filter_("score > 0")
+```
+
+### Exploring the Data
+I'd like to look at some of the trends in performance of the movies, e.g. which has the highest average rating? Which is most popular (often seen)?
+
+```{r findings}
+# Explore the dataset
+seen_results %>%
+  group_by(film) %>%
+  summarise(sum_score = sum(score), mean_score = mean(score), median_score = median(score), IQR_score = IQR(score))
+```
+It looks like Parasite has the highest median score, and is tied with Ford V. Ferrari for mean, but has a higher IQR, suggesting it's more divisive.
+
+Then let's look at the number of ratings.
+
+```{r count}
+view_counts <- seen_results %>%
+  group_by(film) %>%
+  summarise(count = n_distinct(participant_id))
+
+colnames(view_counts) <- c('film','view_counts')
+
+view_counts
+```
+
+Joker and Little Women were most popular, with the most results.
+
+### Visualize the scores
+Let's compare the distribution of scores across these films. From 'R for Everyone', we can use `facet_wrap` to reduce the amount of code needed to generate histogramps for each film.  
+
+```{r histo}
+ggplot(data = results, aes(x = score)) +
+  geom_histogram() + facet_wrap(~film)
+```
+
+From these charts, it seems Marriage Story is the most disliked film, while Ford v. Ferrari has the most middle of the road scores. It's likely a 'safer' bet than something like Parasite, as it has only 1 score below 3.
+
+We can also exclude those who haven't seen the film, for cleaner viz: 
+
+```{r histo-seen}
+ggplot(data = seen_results, aes(x = score)) +
+  geom_histogram() + facet_wrap(~film)
+```
+
+Here we can really see the divisiveness of Parasite in these ratings.
+
+## Summary Table
+I'd like to build a short summary table of film performance.
+
+```{r summary-table}
+summary_df <- seen_results %>%
+  group_by(film) %>%
+  summarise(sum_score = sum(score), mean_score = mean(score), median_score = median(score), IQR_score = IQR(score))
+
+summary_df <- inner_join(summary_df,view_counts,by=c("film"))
+# discovered inner join here https://www.statmethods.net/management/merging.html
+
+summary_df
+```
+
+## Conclusions
+From these very limited results, I would watch Parasite or Ford v. Ferrari. I think the latter is a 'safer' bet, with more people who didn't 'love' it 'liking' it. 
+
+
+## Alternative Solution
+I wasn't sure if we were required to create a separate SQL script file, so I wanted to leave in the above solution that includes a `.sql` file. But doing some digging, I also found a Google Sheets R package, so I wanted to try recreating the above dataset using that package and doing SQL manipulation within R.
+
+```{r import-sheets}
+# Imports results into a dataframe
+sheet <- read_sheet("https://docs.google.com/spreadsheets/d/1GzeBYKKMgy_tedn2w1O4TyebHaKWJbFlaU--sPgChEc/edit?usp=sharing") 
+
+```
+
+From there, we can recreate our SQL script using the `sqldf` R package.
+
+```{r sql-transform}
+# per instructions here, setting driver to SQLite: 
+# https://stackoverflow.com/questions/38416714/failed-to-connect-the-database-when-using-sqldf-in-r
+options(sqldf.driver = "SQLite")
+
+# First we add a participant ID per the original SQL script
+updated_sheet <- sqldf("SELECT *, 
+ROW_NUMBER() OVER (
+    ORDER BY Timestamp ASC
+) AS participant_id 
+FROM sheet")
+
+colnames(updated_sheet) <- c('timestamp','joker','marriage_story','once_upon_a_time','parasite','ford_v_ferrari','little_women','participant_id')
+
+# Then I can use UNION to pull it all together into the transformed_results
+
+sheet_results <- sqldf("SELECT
+participant_id
+,timestamp
+,'joker' as film
+,CASE WHEN joker = '' THEN 0 ELSE joker END as score
+FROM updated_sheet
+
+UNION ALL
+SELECT
+participant_id
+,timestamp
+,'marriage_story' as film
+,CASE WHEN marriage_story = '' THEN 0 ELSE marriage_story END as score
+FROM updated_sheet
+
+UNION ALL
+SELECT
+participant_id
+,timestamp
+,'once_upon_a_time' as film
+,CASE WHEN once_upon_a_time = '' THEN 0 ELSE once_upon_a_time END as score
+FROM updated_sheet
+
+UNION ALL
+SELECT
+participant_id
+,timestamp
+,'parasite' as film
+,CASE WHEN parasite = '' THEN 0 ELSE parasite END as score
+FROM updated_sheet
+
+UNION ALL
+SELECT
+participant_id
+,timestamp
+,'ford_v_ferrari' as film
+,CASE WHEN ford_v_ferrari = '' THEN 0 ELSE ford_v_ferrari END as score
+FROM updated_sheet
+
+UNION ALL
+SELECT
+participant_id
+,timestamp
+,'little_women' as film
+,CASE WHEN little_women = '' THEN 0 ELSE little_women END as score
+FROM updated_sheet
+")
+```
+
+Now, we should have the same results as with the CSV + SQL script: 
+
+```{r findings-sheet}
+# remove 0 values
+seen_sheet <- sheet_results %>%
+  filter_("score > 0")
+seen_sheet %>%
+  group_by(film) %>%
+  summarise(sum_score = sum(score), mean_score = mean(score), median_score = median(score), IQR_score = IQR(score))
+```
